@@ -17,7 +17,7 @@ from dateutil.parser import parse
 from dateutil.rrule import rrule, WEEKLY
 import pytz
 
-# Pydantic Modelsd
+# Pydantic Models
 class SubjectResponse(BaseModel):
     subject_id: str
     name: str
@@ -131,15 +131,13 @@ app.add_middleware(
 )
 
 # MongoDB Connection
+origins = [
+    "http://localhost:5173",  # frontend dev server
+    "https://your-frontend-domain.com"  # production (if needed)
+]
+
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-client = AsyncIOMotorClient(
-    MONGO_URI,
-    serverSelectionTimeoutMS=30000,  # Increase server selection timeout to 30s
-    connectTimeoutMS=30000,          # Increase connection timeout to 30s
-    socketTimeoutMS=30000,           # Increase socket timeout to 30s
-    tls=True,                        # Explicitly enable TLS
-    tlsAllowInvalidCertificates=False  # Enforce certificate validation
-)
+client = AsyncIOMotorClient(MONGO_URI)
 db = client.get_database("school")  # Explicitly specify the database name
 admins_collection = db.admins
 student_info_collection = db.student_info
@@ -313,7 +311,7 @@ async def create_student(student: StudentCreate, admin: dict = Depends(get_admin
     
     hashed_password = get_password_hash(student.password)
     student_dict = student.dict()
-    student_dict["hashed_password"] = hashed_password
+    user_dict["hashed_password"] = hashed_password
     student_dict.pop("password")
     
     try:
