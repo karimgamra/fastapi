@@ -133,7 +133,7 @@ app.add_middleware(
 # MongoDB Connection
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 client = AsyncIOMotorClient(MONGO_URI)
-db = client.get_database()  # Automatically uses the database specified in MONGO_URI (e.g., 'school')
+db = client.get_database("school")  # Explicitly specify the database name
 admins_collection = db.admins
 student_info_collection = db.student_info
 teacher_info_collection = db.teacher_info
@@ -306,7 +306,7 @@ async def create_student(student: StudentCreate, admin: dict = Depends(get_admin
     
     hashed_password = get_password_hash(student.password)
     student_dict = student.dict()
-    student_dict["hashed_password"] = hashed_password
+    user_dict["hashed_password"] = hashed_password
     student_dict.pop("password")
     
     try:
@@ -349,7 +349,7 @@ async def login_for_access_token(form_data: LoginForm):
 
     if not user or not verify_password(form_data.password, user["hashed_password"]):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code= status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect ID, password, or role",
             headers={"WWW-Authenticate": "Bearer"},
         )
