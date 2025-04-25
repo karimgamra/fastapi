@@ -1,32 +1,23 @@
-from fastapi.security import OAuth2PasswordRequestForm
+*import os
 from fastapi import FastAPI, HTTPException, Depends, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 from motor.motor_asyncio import AsyncIOMotorClient
 from passlib.context import CryptContext
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import List, Optional
 from bson.objectid import ObjectId
 import bson.errors
 import pymongo
-from pydantic import BaseModel
+from pymongo.errors import DuplicateKeyError, PyMongoError
 import jwt
-from pydantic import BaseModel
+import logging
 from dateutil.parser import parse
 from dateutil.rrule import rrule, WEEKLY
-from datetime import datetime, date, timedelta
-from pymongo.errors import DuplicateKeyError
-from fastapi import FastAPI, Depends, HTTPException, status
-from datetime import datetime, timedelta
-from pydantic import BaseModel
-from typing import List, Optional
 import pytz
 
-from bson import ObjectId
-from pymongo.errors import PyMongoError
-
-
+# Pydantic Models
 class SubjectResponse(BaseModel):
     subject_id: str
     name: str
@@ -35,53 +26,23 @@ class SubjectResponse(BaseModel):
     class_name: str
     created_by: str
     created_at: datetime
-app = FastAPI()
 
-# CORS Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# MongoDB Connection
-client = AsyncIOMotorClient("mongodb://localhost:27017")
-db = client.auth_db
-admins_collection = db.admins
-student_info_collection = db.student_info
-teacher_info_collection = db.teacher_info
-subjects_collection = db.subjects
-events_collection = db.events
-attendance_collection = db.attendance
-
-# JWT Configuration
-SECRET_KEY = "your-secret-key"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-# Password Hashing
-pwd_context = CryptContext(schemes=["bcrypt"], bcrypt__rounds=12, deprecated="auto")
-
-# Global Sets for Validation
-valid_student_ids = set()
-valid_teacher_ids = set()
-
-# Pydantic Models
 class Token(BaseModel):
     access_token: str
     token_type: str
+
 class LoginForm(BaseModel):
     id: str
     password: str
     role: str
+
 class User(BaseModel):
     username: str
     email: EmailStr
     password: str
     id: str
-    role: str  # New field for role (admin, student, teacher)
+    role: str
+
 class UserInDB(User):
     hashed_password: str
 
@@ -127,11 +88,11 @@ class AttendanceCreate(BaseModel):
     event_id: str
     date: datetime
     status: str
-    
+
 class ScheduleResponse(BaseModel):
     class_name: str
     subject_name: str
-    subject_id: Optional[str]  # Optional in case subject not found
+    subject_id: Optional[str]
     teacher_id: str
     teacher_name: str
 
@@ -145,14 +106,6 @@ class CalendarEntryResponse(BaseModel):
     created_by: str
     created_at: datetime
 
-from datetime import time
-from dateutil.parser import parse
-
-# Valid Days
-# New MongoDB Collection
-calendar_collection = db.calendar
-
-# New Pydantic Models
 class ClassSchedule(BaseModel):
     class_name: str
     subject_name: str
@@ -164,6 +117,50 @@ class CalendarEntry(BaseModel):
     end_time: str
     schedules: List[ClassSchedule]
     recurrence_end: Optional[datetime] = None
+
+# FastAPI App Setup
+app = FastAPI()
+
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# MongoDB Connection
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+client = AsyncIOMotorClient(MONGO_URI)
+db = client.get_database()  # Automatically uses the database specified in MONGO_URI (e.g., 'school')
+admins_collection = db.admins
+student_info_collection = db.student_info
+teacher_info_collection = db.teacher_info
+subjects_collection = db.subjects
+events_collection = db.events
+attendance_collection = db.attendance
+calendar_collection = db.calendar
+
+# JWT Configuration
+SECRET_KEY = "your-secret-key"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+# Password Hashing
+pwd_context = CryptContext(schemes=["bcrypt"], bcrypt__rounds=12, deprecated="auto")
+
+# Global Sets for Validation
+valid_student_ids = set()
+valid_teacher_ids = set()
+
+# Valid Days
+VALID_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 # JWT Functions
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
@@ -191,6 +188,19 @@ async def get_admin_user(id: str = Query(...), role: str = Query(...)):
         raise HTTPException(status_code=404, detail="Admin not found")
     return {"id": id, "role": role}
 
+# Dependency for Teacher or Admin Access
+async def get_teacher_or_admin(id: str = Query(...), role: str = Query(...)):
+    if role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="Teacher or admin access required")
+    user = None
+    if role == "teacher":
+        user = await teacher_info_collection.find_one({"id": id})
+    elif role == "admin":
+        user = await admins_collection.find_one({"id": id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"id": id, "role": role}
+
 # Sample Data Insertion (Only Admins)
 async def insert_sample_admins():
     sample_admin = {
@@ -206,7 +216,7 @@ async def insert_sample_admins():
     except Exception as e:
         print(f"Error inserting sample admins: {str(e)}")
 
-# Startup Event (Only Admins and Indexes)
+# Startup Event (Indexes and Sample Data)
 @app.on_event("startup")
 async def startup_event():
     await subjects_collection.create_index([("name", 1), ("teacher_id", 1), ("class_name", 1)], unique=True)
@@ -216,6 +226,10 @@ async def startup_event():
     await events_collection.create_index([("subject_id", 1), ("start_time", 1)])
     await events_collection.create_index([("teacher_id", 1), ("start_time", 1)])
     await events_collection.create_index([("class_name", 1), ("start_time", 1)])
+    await calendar_collection.create_index(
+        [("day_of_week", 1), ("start_time", 1), ("end_time", 1), ("schedules.class_name", 1)],
+        unique=True
+    )
 
     await insert_sample_admins()
 
@@ -245,13 +259,12 @@ async def register(user: User):
         data={"sub": user.id, "role": "student"}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
+
 @app.post("/admin/register")
 async def admin_register(user: User, admin: dict = Depends(get_admin_user)):
-    # Validate role
     if user.role not in ["admin", "student", "teacher"]:
         raise HTTPException(status_code=400, detail="Invalid role. Must be 'admin', 'student', or 'teacher'")
 
-    # Check if ID is already taken
     if user.role == "student" and user.id in valid_student_ids:
         raise HTTPException(status_code=400, detail="Student ID already registered")
     if user.role == "teacher" and user.id in valid_teacher_ids:
@@ -261,14 +274,12 @@ async def admin_register(user: User, admin: dict = Depends(get_admin_user)):
         if existing_admin:
             raise HTTPException(status_code=400, detail="Admin ID already registered")
 
-    # Hash the password
     hashed_password = get_password_hash(user.password)
     user_dict = user.dict()
     user_dict["hashed_password"] = hashed_password
     user_dict.pop("password")
 
     try:
-        # Insert user into the appropriate collection
         if user.role == "admin":
             await admins_collection.insert_one(user_dict)
         elif user.role == "student":
@@ -278,7 +289,6 @@ async def admin_register(user: User, admin: dict = Depends(get_admin_user)):
             await teacher_info_collection.insert_one(user_dict)
             valid_teacher_ids.add(user.id)
 
-        # Return user details
         return {
             "message": "Registration successful",
             "username": user.username,
@@ -288,6 +298,7 @@ async def admin_register(user: User, admin: dict = Depends(get_admin_user)):
         }
     except pymongo.errors.DuplicateKeyError:
         raise HTTPException(status_code=400, detail="Email or username already exists")
+
 @app.post("/admin/students")
 async def create_student(student: StudentCreate, admin: dict = Depends(get_admin_user)):
     if student.id in valid_student_ids:
@@ -322,14 +333,6 @@ async def create_teacher(teacher: TeacherCreate, admin: dict = Depends(get_admin
     except pymongo.errors.DuplicateKeyError:
         raise HTTPException(status_code=400, detail="Email or ID already exists")
 
-from fastapi import FastAPI, Depends, HTTPException, status
-import logging
-
-# Set up logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
-
-
 @app.post("/login")
 async def login_for_access_token(form_data: LoginForm):
     user = None
@@ -362,16 +365,13 @@ async def login_for_access_token(form_data: LoginForm):
         "role": role,
         "id": user["id"]
     }
-    
 
 @app.post("/admin/subjects")
 async def assign_subject(subject: SubjectCreate, admin: dict = Depends(get_admin_user)):
-    # Check if teacher exists
     teacher = await teacher_info_collection.find_one({"id": subject.teacher_id})
     if not teacher:
         raise HTTPException(status_code=404, detail="Teacher not found")
     
-    # Check if subject already exists for this class and teacher
     existing_subject = await subjects_collection.find_one({
         "name": subject.name,
         "teacher_id": subject.teacher_id,
@@ -380,7 +380,6 @@ async def assign_subject(subject: SubjectCreate, admin: dict = Depends(get_admin
     if existing_subject:
         raise HTTPException(status_code=400, detail="Subject already exists for this class and teacher")
     
-    # Insert the subject into subjects_collection
     subject_data = {
         "name": subject.name,
         "teacher_id": subject.teacher_id,
@@ -393,7 +392,6 @@ async def assign_subject(subject: SubjectCreate, admin: dict = Depends(get_admin
     except DuplicateKeyError:
         raise HTTPException(status_code=400, detail="Subject already exists for this class and teacher")
     
-    # Update teacher's subjects and classes in teacher_info_collection
     await teacher_info_collection.update_one(
         {"id": subject.teacher_id},
         {
@@ -411,24 +409,7 @@ async def assign_subject(subject: SubjectCreate, admin: dict = Depends(get_admin
         "subject_name": subject.name,
         "class_name": subject.class_name
     }
-    
-    
-@app.post("/admin/teachers")
-async def create_teacher(teacher: TeacherCreate, admin: dict = Depends(get_admin_user)):
-    if teacher.id in valid_teacher_ids:
-        raise HTTPException(status_code=400, detail="Teacher ID already registered")
-    
-    hashed_password = get_password_hash(teacher.password)
-    teacher_dict = teacher.dict()
-    teacher_dict["hashed_password"] = hashed_password
-    teacher_dict.pop("password")
-    
-    try:
-        await teacher_info_collection.insert_one(teacher_dict)
-        valid_teacher_ids.add(teacher.id)
-        return {"message": "Teacher created successfully", "teacher_id": teacher.id}
-    except pymongo.errors.DuplicateKeyError:
-        raise HTTPException(status_code=400, detail="Email or ID already exists")
+
 @app.get("/admin/students")
 async def get_students(admin: dict = Depends(get_admin_user)):
     students = await student_info_collection.find(
@@ -485,11 +466,12 @@ async def create_event(event: EventCreate, admin: dict = Depends(get_admin_user)
         return {"message": "Recurring events created", "event_ids": [str(id) for id in result.inserted_ids]}
     
     result = await events_collection.insert_one(event_data)
-    event_data["id"] = str(result.inserted_id)
-    return event_data
+    return {"message": "Event created", "event_ids": [str(result.inserted_id)]}
+
 @app.get("/debug/teacher-ids")
 async def debug_teacher_ids():
     return {"valid_teacher_ids": list(valid_teacher_ids)}
+
 @app.get("/events")
 async def get_events(start_date: datetime, end_date: datetime, user_id: str, role: str):
     if role == "teacher":
@@ -537,7 +519,6 @@ async def mark_attendance(attendance: AttendanceCreate):
     if student["speciality"] != event["class_name"]:
         raise HTTPException(status_code=400, detail="Student not enrolled in this class")
     
-    # Validate attendance against calendar event
     event_date = event["start_time"].date()
     attendance_date = attendance.date.date()
     if event_date != attendance_date:
@@ -556,6 +537,7 @@ async def mark_attendance(attendance: AttendanceCreate):
         return {"message": "Attendance marked successfully"}
     except pymongo.errors.DuplicateKeyError:
         raise HTTPException(status_code=400, detail="Attendance already marked for this student, subject, event, and date")
+
 @app.get("/attendance")
 async def get_attendance(student_id: str, subject_id: str):
     try:
@@ -580,41 +562,11 @@ async def get_attendance(student_id: str, subject_id: str):
         record["_id"] = str(record["_id"])
     return attendance_records
 
-@app.on_event("startup")
-async def startup_event():
-    # Existing indexes
-    await subjects_collection.create_index([("name", 1), ("teacher_id", 1), ("class_name", 1)], unique=True)
-    await attendance_collection.create_index([("student_id", 1), ("subject_id", 1), ("event_id", 1), ("date", 1)], unique=True)
-    await student_info_collection.create_index([("id", 1)], unique=True)
-    await teacher_info_collection.create_index([("id", 1)], unique=True)
-    await events_collection.create_index([("subject_id", 1), ("start_time", 1)])
-    await events_collection.create_index([("teacher_id", 1), ("start_time", 1)])
-    await events_collection.create_index([("class_name", 1), ("start_time", 1)])
-    # New calendar index to prevent duplicate schedules
-    await calendar_collection.create_index(
-        [("day_of_week", 1), ("start_time", 1), ("end_time", 1), ("schedules.class_name", 1)],
-        unique=True
-    )
-
-    await insert_sample_admins()
-
-    global valid_student_ids, valid_teacher_ids
-    valid_student_ids = {student["id"] for student in await student_info_collection.find({}, {"id": 1}).to_list(None)}
-    valid_teacher_ids = {teacher["id"] for teacher in await teacher_info_collection.find({}, {"id": 1}).to_list(None)}
-
-# Valid Days
-VALID_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
-
-
-
-
 @app.post("/admin/calendar")
 async def create_calendar(entry: CalendarEntry, admin: dict = Depends(get_admin_user)):
-    # Validate day_of_week
     if entry.day_of_week not in VALID_DAYS:
         raise HTTPException(status_code=400, detail="Invalid day_of_week. Must be Monday to Friday")
 
-    # Parse times
     try:
         start_time = parse(entry.start_time).time()
         end_time = parse(entry.end_time).time()
@@ -624,7 +576,6 @@ async def create_calendar(entry: CalendarEntry, admin: dict = Depends(get_admin_
     if start_time >= end_time:
         raise HTTPException(status_code=400, detail="start_time must be before end_time")
 
-    # Validate schedules
     for schedule in entry.schedules:
         if schedule.teacher_id not in valid_teacher_ids:
             raise HTTPException(status_code=404, detail=f"Teacher ID {schedule.teacher_id} not found")
@@ -648,7 +599,6 @@ async def create_calendar(entry: CalendarEntry, admin: dict = Depends(get_admin_
                 detail=f"Subject {schedule.subject_name} for class {schedule.class_name} not found"
             )
 
-    # Check for duplicate schedules
     calendar_entry = {
         "day_of_week": entry.day_of_week,
         "start_time": entry.start_time,
@@ -665,27 +615,20 @@ async def create_calendar(entry: CalendarEntry, admin: dict = Depends(get_admin_
             detail="Schedule already exists for this day, time, and class"
         )
 
-    # Generate events for recurrence
     if entry.recurrence_end:
         event_ids = []
-        # Create a UTC timezone-aware start_date
         utc = pytz.UTC
         start_date = datetime.now(utc).replace(
             hour=start_time.hour, minute=start_time.minute, second=0, microsecond=0
         )
-        # Adjust start_date to the correct day_of_week
         days_ahead = (VALID_DAYS.index(entry.day_of_week) - start_date.weekday()) % 7
         start_date = start_date + timedelta(days=days_ahead)
 
-        # Ensure recurrence_end is UTC timezone-aware
         if entry.recurrence_end.tzinfo is None:
-            # If recurrence_end is naive, assume it's in UTC and make it aware
             recurrence_end = utc.localize(entry.recurrence_end)
         else:
-            # If recurrence_end is timezone-aware, convert to UTC
             recurrence_end = entry.recurrence_end.astimezone(utc)
 
-        # Generate recurring events
         for dt in rrule(WEEKLY, dtstart=start_date, until=recurrence_end):
             for schedule in entry.schedules:
                 subject = await subjects_collection.find_one({
@@ -704,14 +647,13 @@ async def create_calendar(entry: CalendarEntry, admin: dict = Depends(get_admin_
                     "created_by": admin["id"],
                     "created_at": datetime.utcnow()
                 }
-                # Check for conflicting events
                 existing_events = await events_collection.find({
                     "teacher_id": schedule.teacher_id,
                     "start_time": {"$lt": event_data["end_time"]},
                     "end_time": {"$gt": event_data["start_time"]}
                 }).to_list(None)
                 if existing_events:
-                    continue  # Skip conflicting events
+                    continue
                 result = await events_collection.insert_one(event_data)
                 event_ids.append(str(result.inserted_id))
 
@@ -719,20 +661,14 @@ async def create_calendar(entry: CalendarEntry, admin: dict = Depends(get_admin_
 
     return {"message": "Calendar created", "event_ids": []}
 
-
-
-
 @app.get("/admin/subjects", response_model=List[SubjectResponse])
 async def get_all_subjects(admin: dict = Depends(get_admin_user)):
-    # Fetch all subjects
     subjects = await subjects_collection.find().to_list(None)
     if not subjects:
         raise HTTPException(status_code=404, detail="No subjects found")
     
-    # Prepare response with teacher names
     subject_responses = []
     for subject in subjects:
-        # Fetch teacher name
         teacher = await teacher_info_collection.find_one({"id": subject["teacher_id"]})
         teacher_name = teacher["name"] if teacher else "Unknown"
         
@@ -748,51 +684,20 @@ async def get_all_subjects(admin: dict = Depends(get_admin_user)):
     
     return subject_responses
 
-
-
-
-
-
-from fastapi import FastAPI, Depends, HTTPException, status
-from pydantic import BaseModel
-from typing import List, Optional
-
-# Pydantic models for calendar response
-class ScheduleResponse(BaseModel):
-    class_name: str
-    subject_name: str
-    subject_id: Optional[str]  # Optional in case subject not found
-    teacher_id: str
-    teacher_name: str
-
-class CalendarEntryResponse(BaseModel):
-    entry_id: str
-    day_of_week: str
-    start_time: str
-    end_time: str
-    schedules: List[ScheduleResponse]
-    recurrence_end: Optional[datetime]
-    created_by: str
-    created_at: datetime
-
 @app.get("/admin/calendar", response_model=List[CalendarEntryResponse])
 async def get_admin_calendar(admin: dict = Depends(get_admin_user)):
-    # Fetch all calendar entries
     calendar_entries = await calendar_collection.find().to_list(None)
     
     if not calendar_entries:
         raise HTTPException(status_code=404, detail="No calendar entries found")
     
-    # Prepare response
     calendar_response = []
     for entry in calendar_entries:
         schedules = []
         for schedule in entry["schedules"]:
-            # Fetch teacher name
             teacher = await teacher_info_collection.find_one({"id": schedule["teacher_id"]})
             teacher_name = teacher["name"] if teacher else "Unknown"
             
-            # Fetch subject ID from subjects_collection
             subject = await subjects_collection.find_one({
                 "name": schedule["subject_name"],
                 "teacher_id": schedule["teacher_id"],
@@ -820,14 +725,13 @@ async def get_admin_calendar(admin: dict = Depends(get_admin_user)):
         })
     
     return calendar_response
+
 @app.delete("/admin/calendar/{entry_id}")
 async def delete_calendar_entry(entry_id: str, admin: dict = Depends(get_admin_user)):
     try:
-        # Validate ObjectId
         if not ObjectId.is_valid(entry_id):
             raise HTTPException(status_code=400, detail="Invalid calendar entry ID")
         
-        # Delete the calendar entry
         result = await calendar_collection.delete_one({"_id": ObjectId(entry_id)})
         
         if result.deleted_count == 0:
@@ -837,43 +741,18 @@ async def delete_calendar_entry(entry_id: str, admin: dict = Depends(get_admin_u
     
     except PyMongoError as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    
-    
-async def get_teacher_or_admin(id: str = Query(...), role: str = Query(...)):
-    if role not in ["teacher", "admin"]:
-        raise HTTPException(status_code=403, detail="Teacher or admin access required")
-    user = None
-    if role == "teacher":
-        user = await teacher_info_collection.find_one({"id": id})
-    elif role == "admin":
-        user = await admins_collection.find_one({"id": id})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {"id": id, "role": role}
 
 @app.get("/teachers/{teacher_id}", response_model=dict)
 async def get_teacher(teacher_id: str, user: dict = Depends(get_teacher_or_admin)):
     teacher = await teacher_info_collection.find_one({"id": teacher_id})
     if not teacher:
         raise HTTPException(status_code=404, detail="Teacher not found")
-    # Restrict access: teachers can only view their own details, admins can view any
     if user["role"] == "teacher" and user["id"] != teacher_id:
         raise HTTPException(status_code=403, detail="Cannot access other teacher's details")
-    # Remove sensitive fields
     teacher.pop("hashed_password", None)
     teacher["_id"] = str(teacher["_id"])
     return teacher
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
-
-
-
-
-{
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbjAwMSIsInJvbGUiOiJhZG1pbiIsImV4cCI6MTc0NTMwNjEyOX0.Ij-Lbsci_cw2BejZWwGGmQGUyNj-iefMKhQO-yYO2SA",
-  "token_type": "bearer",
-  "username": "admin",
-  "role": "admin",
-  "id": "admin001"
-}
